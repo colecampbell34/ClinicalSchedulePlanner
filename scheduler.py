@@ -179,9 +179,10 @@ class RedesignedScheduler:
                 else: bucket += 4
             else:
                 if s.program == "Dual": 
-                    # CRITICAL FIX: Prioritize those with some weeks over 0 weeks
-                    if 0 < s.cardiac_weeks_completed < 12: bucket += 5 # Need to finish
-                    else: bucket += 10 # Starting
+                    # If behind schedule, boost priority
+                    if block == "2B" and s.cardiac_weeks_completed == 0: bucket += 1
+                    elif 0 < s.cardiac_weeks_completed < 12: bucket += 2
+                    else: bucket += 10 
                 else: bucket += 50
             return (bucket, random.random())
 
@@ -190,9 +191,16 @@ class RedesignedScheduler:
 
         for s in zero_match_students:
             if block in s.placements: continue 
-            placed = self.place_student(s, block, force_no_repeat=True, is_zero_match_priority=True, only_choices=True)
+            
+            dual_clinic_ban = (s.program == "Dual" and block in ["2A","2B","3A","3B"])
+            
+            placed = self.place_student(s, block, force_no_repeat=True, 
+                                        is_zero_match_priority=True, only_choices=True, 
+                                        ban_clinics=dual_clinic_ban)
             if not placed:
-                placed = self.place_student(s, block, force_no_repeat=False, is_zero_match_priority=True, only_choices=True)
+                placed = self.place_student(s, block, force_no_repeat=False, 
+                                            is_zero_match_priority=True, only_choices=True,
+                                            ban_clinics=dual_clinic_ban)
         
         # --- 2. REGULAR SCHEDULING ---
         remaining_active = [s for s in active if block not in s.placements]
@@ -212,16 +220,16 @@ class RedesignedScheduler:
                 elif s.program == "Dual" and s.cardiac_weeks_completed < 12: bucket += 2
                 else: bucket += 4
             else:
-                # 2A-3B LOGIC UPDATE:
                 if s.program == "Dual": 
-                    # If they have 6-7 weeks, they are PRIORITY 1 to finish.
-                    if 0 < s.cardiac_weeks_completed < 12:
+                    # 2B Priority: 0 weeks -> High Priority
+                    if block == "2B" and s.cardiac_weeks_completed == 0:
+                        bucket += 5
+                    # Finisher Priority:
+                    elif 0 < s.cardiac_weeks_completed < 12:
                         bucket += 5
                     else:
-                        # If they have 0, they are Priority 2 (Start new)
                         bucket += 10
-                else: 
-                    bucket += 50
+                else: bucket += 50
             
             matches = self.get_match_count(s)
             return (bucket, matches, random.random())
@@ -283,7 +291,7 @@ class RedesignedScheduler:
 
     # ==================== PLACEMENT LOGIC ====================
 
-    def place_student(self, s, block, force_no_repeat=False, is_zero_match_priority=False, only_choices=False):
+    def place_student(self, s, block, force_no_repeat=False, is_zero_match_priority=False, only_choices=False, ban_clinics=False):
         if s.program == "Cardiac":
             return self.try_site(s, block, cardiac=True, force_no_repeat=force_no_repeat, 
                                  is_zero_match_priority=is_zero_match_priority, only_choices=only_choices)
@@ -308,53 +316,77 @@ class RedesignedScheduler:
             
             # --- 2. 4A/4B LOGIC ---
             if block in ["4A", "4B"]:
+                if ban_clinics: # Safety check
+                    if s.cardiac_weeks_completed >= 12:
+                        return self.try_site(s, block, general=True, force_no_repeat=force_no_repeat, 
+                                             is_zero_match_priority=is_zero_match_priority, only_choices=only_choices)
+                    else:
+                        return self.try_site(s, block, cardiac=True, force_no_repeat=force_no_repeat, 
+                                             is_zero_match_priority=is_zero_match_priority, only_choices=only_choices)
+
+                # DONE CARDIAC -> Clinic Priority
                 if s.cardiac_weeks_completed >= 12:
-                    # DONE CARDIAC
                     if self.try_clinic(s, block, force_no_repeat=force_no_repeat, 
                                       is_zero_match_priority=is_zero_match_priority, only_choices=only_choices): return True
                     if self.try_site(s, block, general=True, force_no_repeat=force_no_repeat, 
                                      is_zero_match_priority=is_zero_match_priority, only_choices=only_choices): return True
                     return False 
                 else:
-                    # NEED CARDIAC (STRICT)
+                    # NEED CARDIAC
                     if self.try_site(s, block, cardiac=True, force_no_repeat=force_no_repeat, 
                                      is_zero_match_priority=is_zero_match_priority, only_choices=only_choices): return True
-                    
-                    # DO NOT FALLBACK TO GENERAL/CLINIC.
-                    # We must fail here to trigger emergency placement to find a cardiac spot if possible.
-                    return False
+                    return self.try_clinic(s, block, force_no_repeat=force_no_repeat, 
+                                          is_zero_match_priority=is_zero_match_priority, only_choices=only_choices)
 
             # --- 3. 2A-3B LOGIC ---
             if s.cardiac_weeks_completed < 13:
+                
+                # Check conflicts
                 if self.is_same_number_cardiac_conflict(s, block):
                     return self.try_site(s, block, general=True, force_no_repeat=force_no_repeat, 
                                          is_zero_match_priority=is_zero_match_priority, only_choices=only_choices)
 
-                # STRANDED STUDENT CHECK: FORCE CARDIAC
+                # STRANDED / IN-PROGRESS: Force Cardiac
                 if s.cardiac_weeks_completed > 0:
                     if self.try_site(s, block, cardiac=True, force_no_repeat=force_no_repeat, 
                                      allow_new_dual_start=True, is_zero_match_priority=is_zero_match_priority, only_choices=only_choices): return True
-                    # FAIL HARD to avoid General/Clinic if we strictly need Cardiac to finish.
                     return False
 
-                # 0 Weeks: Load Balancer
-                can_start_dual = (block in ["2A", "3A"])
-                prefer_general = (random.random() < 0.5) if block in ["2A", "3A"] else False
+                # 0 Weeks: LOAD BALANCER
+                
+                # BLOCK 2A: 50/50 Split
+                if block == "2A":
+                    prefer_general = (random.random() < 0.5)
+                    if prefer_general:
+                        if self.try_site(s, block, general=True, force_no_repeat=force_no_repeat, 
+                                         is_zero_match_priority=is_zero_match_priority, only_choices=only_choices): return True
+                        if self.try_site(s, block, cardiac=True, force_no_repeat=force_no_repeat, 
+                                         allow_new_dual_start=True, is_zero_match_priority=is_zero_match_priority, only_choices=only_choices): return True
+                    else:
+                        if self.try_site(s, block, cardiac=True, force_no_repeat=force_no_repeat, 
+                                         allow_new_dual_start=True, is_zero_match_priority=is_zero_match_priority, only_choices=only_choices): return True
+                        if self.try_site(s, block, general=True, force_no_repeat=force_no_repeat, 
+                                         is_zero_match_priority=is_zero_match_priority, only_choices=only_choices): return True
+                    return False
 
-                if prefer_general:
-                    if self.try_site(s, block, general=True, force_no_repeat=force_no_repeat, 
-                                     is_zero_match_priority=is_zero_match_priority, only_choices=only_choices): return True
+                # BLOCK 2B: Catch-up if missed 2A
+                if block == "2B" and s.cardiac_weeks_completed == 0:
+                    # FORCE CARDIAC (They chose Tails in 2A, now they must pay with Heads)
                     if self.try_site(s, block, cardiac=True, force_no_repeat=force_no_repeat, 
-                                     allow_new_dual_start=can_start_dual, is_zero_match_priority=is_zero_match_priority, only_choices=only_choices): return True
-                else:
-                    if self.try_site(s, block, cardiac=True, force_no_repeat=force_no_repeat, 
-                                     allow_new_dual_start=can_start_dual, is_zero_match_priority=is_zero_match_priority, only_choices=only_choices): return True
-                    if self.try_site(s, block, general=True, force_no_repeat=force_no_repeat, 
-                                     is_zero_match_priority=is_zero_match_priority, only_choices=only_choices): return True
+                                     allow_new_dual_start=True, is_zero_match_priority=is_zero_match_priority, only_choices=only_choices): return True
+                    # If no cardiac, they are in trouble for 3A/3B but allow general
+                    return self.try_site(s, block, general=True, force_no_repeat=force_no_repeat, 
+                                         is_zero_match_priority=is_zero_match_priority, only_choices=only_choices)
 
-                # Worst Case: Clinic (Only if not stranded)
-                return self.try_clinic(s, block, force_no_repeat=force_no_repeat, 
-                                      is_zero_match_priority=is_zero_match_priority, only_choices=only_choices)
+                # BLOCK 3A/3B: If 0 weeks, PANIC PRIORITY
+                if block in ["3A", "3B"] and s.cardiac_weeks_completed == 0:
+                    if self.try_site(s, block, cardiac=True, force_no_repeat=force_no_repeat, 
+                                     allow_new_dual_start=True, is_zero_match_priority=is_zero_match_priority, only_choices=only_choices): return True
+                    return False
+
+                # Default fallback
+                return self.try_site(s, block, general=True, force_no_repeat=force_no_repeat, 
+                                     is_zero_match_priority=is_zero_match_priority, only_choices=only_choices)
 
             # Done Cardiac, prefer General
             return self.try_site(s, block, general=True, force_no_repeat=force_no_repeat, 
@@ -375,6 +407,10 @@ class RedesignedScheduler:
         unique_map = {x.site_id: x for x in candidates}
         candidates = list(unique_map.values())
         
+        # REMOVE SITES UNAVAILABLE IN SPRING
+        if block in ["2A", "2B", "3A"]:
+            candidates = [x for x in candidates if not x.only_may_to_dec]
+
         last_site_name = ""
         idx = BLOCKS.index(block)
         if idx > 0:
@@ -486,7 +522,9 @@ class RedesignedScheduler:
                 return True
         return False
 
-    def try_clinic(self, s, block, force_no_repeat=False, is_zero_match_priority=False, only_choices=False):
+    def try_clinic(self, s, block, force_no_repeat=False, is_zero_match_priority=False, only_choices=False, ban_clinics=False):
+        if ban_clinics: return False
+
         current_matches = self.get_match_count(s)
         ignore_choices_for_score = (current_matches >= 2) and not is_zero_match_priority
 
@@ -509,6 +547,10 @@ class RedesignedScheduler:
             return (score, random.random())
 
         candidates = self.clinics
+        # REMOVE CLINICS UNAVAILABLE IN SPRING
+        if block in ["2A", "2B", "3A"]:
+            candidates = [c for c in candidates if not c.only_may_to_dec]
+
         if only_choices:
             candidates = [c for c in candidates if c.name in s.choices]
 
@@ -525,15 +567,14 @@ class RedesignedScheduler:
     def emergency_place(self, s, block):
         if s.program == "General":
              if self.try_clinic(s, block, force_no_repeat=False):
-                 self.placement_intent[(s.student_id, block)] = "Warn"
+                 self.placement_intent[(s.student_id, block)] = "Green"
                  return
              if self.try_site(s, block, cardiac=True, general=True, force_no_repeat=False):
-                 self.placement_intent[(s.student_id, block)] = "Warn"
+                 self.placement_intent[(s.student_id, block)] = "Blue"
                  return
 
         if s.program == "Dual":
             if s.cardiac_weeks_completed >= 12:
-                # DONE - Warn but keep colors logic if possible
                 if self.try_site(s, block, general=True, force_no_repeat=False):
                     self.placement_intent[(s.student_id, block)] = "Blue"
                     return
@@ -541,11 +582,9 @@ class RedesignedScheduler:
                     self.placement_intent[(s.student_id, block)] = "Green"
                     return
             else:
-                # NEED - Force Cardiac first
                 if self.try_site(s, block, cardiac=True, force_no_repeat=False):
                     self.placement_intent[(s.student_id, block)] = "Red"
                     return
-                # If cardiac impossible, fail to General
                 if self.try_site(s, block, general=True, force_no_repeat=False):
                     self.placement_intent[(s.student_id, block)] = "Blue"
                     return
