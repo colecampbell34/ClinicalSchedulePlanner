@@ -1,7 +1,7 @@
 import pandas as pd
 import random
 from dataclasses import dataclass, field
-from typing import List, Dict, Tuple
+from typing import List, Dict
 from collections import defaultdict
 import openpyxl
 from openpyxl.styles import PatternFill, Border, Side
@@ -49,7 +49,7 @@ class Student:
 
 # ==================== SCHEDULER ====================
 
-class RedesignedScheduler:
+class Scheduler:
     def __init__(self, excel_path: str):
         self.excel_path = excel_path
         self.students = []
@@ -184,7 +184,7 @@ class RedesignedScheduler:
                     elif 0 < s.cardiac_weeks_completed < 12: bucket += 2
                     else: bucket += 10 
                 else: bucket += 50
-            return (bucket, random.random())
+            return bucket, random.random()
 
         random.shuffle(zero_match_students)
         zero_match_students.sort(key=zero_match_sort_key)
@@ -232,7 +232,7 @@ class RedesignedScheduler:
                 else: bucket += 50
             
             matches = self.get_match_count(s)
-            return (bucket, matches, random.random())
+            return bucket, matches, random.random()
 
         random.shuffle(remaining_active)
         remaining_active.sort(key=regular_sort_key)
@@ -452,24 +452,24 @@ class RedesignedScheduler:
         current_matches = self.get_match_count(s)
         ignore_choices_for_score = (current_matches >= 2) and not is_zero_match_priority
 
-        def site_score(site):
+        def site_score(site_for_scoring):
             score = 0
             
             if not is_zero_match_priority:
                 score += (current_matches * 10000)
 
-            is_bcwh = "Women" in site.name or "BCWH" in site.name
+            is_bcwh = "Women" in site_for_scoring.name or "BCWH" in site_for_scoring.name
             if is_bcwh:
                 if s.program == "Dual": score -= 5000
                 else: score += 5000
             
-            if site.name in s.assigned_sites: score += 100000 
+            if site_for_scoring.name in s.assigned_sites: score += 100000
 
-            if s.program == "Dual" and site.is_dual:
-                if site.name != last_site_name:
+            if s.program == "Dual" and site_for_scoring.is_dual:
+                if site_for_scoring.name != last_site_name:
                     is_top_choice = False
                     try:
-                        s.choices.index(site.name)
+                        s.choices.index(site_for_scoring.name)
                         is_top_choice = True
                     except ValueError: pass
 
@@ -482,14 +482,14 @@ class RedesignedScheduler:
                 score += 500 
             else:
                 try: 
-                    score += s.choices.index(site.name)
+                    score += s.choices.index(site_for_scoring.name)
                 except ValueError: 
                     score += 500 
             
-            if site.out_of_town and site.name not in s.accommodation_sites: score += 500
-            if not cardiac and site.is_cardiac: score += 1000 
+            if site_for_scoring.out_of_town and site_for_scoring.name not in s.accommodation_sites: score += 500
+            if not cardiac and site_for_scoring.is_cardiac: score += 1000
 
-            return (score, random.random())
+            return score, random.random()
 
         candidates.sort(key=site_score)
 
@@ -544,7 +544,7 @@ class RedesignedScheduler:
                     score += 500
             
             if c.out_of_town and c.name not in s.accommodation_sites: score += 500
-            return (score, random.random())
+            return score, random.random()
 
         candidates = self.clinics
         # REMOVE CLINICS UNAVAILABLE IN SPRING
@@ -804,7 +804,7 @@ BLOCK_WEEKS = {"2A":7,"2B":6,"3A":6,"3B":7,"Summer":7,"4A":7,"4B":6}
 # ==================== MAIN ====================
 
 def main():
-    scheduler = RedesignedScheduler("Student_Site_Data.xlsx")
+    scheduler = Scheduler("Student_Site_Data.xlsx")
     scheduler.load_data()
     if not scheduler.students:
         print("No students loaded. Check Excel file.")
